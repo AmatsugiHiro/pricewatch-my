@@ -1,8 +1,10 @@
 *.log
 .DS_Store
 .env
-.env.backup
-.env.production
+# Every environment file, so a throwaway like .env.aiven cannot be committed
+# to a public repository with live database credentials in it.
+.env.*
+!.env.example
 .phpactor.json
 .phpunit.result.cache
 /.codex
