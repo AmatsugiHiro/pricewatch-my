@@ -31,6 +31,7 @@ class SyncPriceData extends Command
         LookupImporter $lookups,
         PriceCatcherImporter $prices,
         DailyPriceAggregator $aggregator,
+        WatchEvaluator $evaluator,
     ): int {
         $force = (bool) $this->option('force');
 
@@ -67,7 +68,7 @@ class SyncPriceData extends Command
             $this->newLine();
             $this->components->info('Evaluating watchlists');
 
-            $result = $this->app->make(WatchEvaluator::class)->evaluate();
+            $result = $evaluator->evaluate();
 
             $this->components->twoColumnDetail('Watches evaluated', number_format($result->evaluated));
             $this->components->twoColumnDetail('Thresholds breached', number_format($result->breached));
