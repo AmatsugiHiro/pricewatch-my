@@ -119,6 +119,76 @@ class LineChartTest extends TestCase
         $this->assertSame(12.0, $chart->lastPoint()['value']);
     }
 
+    /**
+     * A series shaped like the one PriceQueries::series() actually returns.
+     *
+     * @return Collection<int, object>
+     */
+    private function richSeries(): Collection
+    {
+        return collect([
+            (object) ['date' => '2026-08-29', 'avg_price' => 9.4567, 'min_price' => 7.20, 'max_price' => 12.00, 'sample_count' => 812],
+            (object) ['date' => '2026-08-30', 'avg_price' => 9.5000, 'min_price' => 7.50, 'max_price' => 11.80, 'sample_count' => 1],
+        ]);
+    }
+
+    #[Test]
+    public function it_formats_every_tooltip_figure_on_the_server(): void
+    {
+        $tooltips = LineChart::fromSeries($this->richSeries())->tooltipPoints();
+
+        $this->assertCount(2, $tooltips);
+        $this->assertSame('Sat, 29 Aug 2026', $tooltips[0]['date']);
+        // Rounded to sen for display, not left as 9.4567.
+        $this->assertSame('RM 9.46', $tooltips[0]['price']);
+        $this->assertSame('RM 7.20 – RM 12.00', $tooltips[0]['range']);
+        $this->assertSame('812 premises', $tooltips[0]['samples']);
+    }
+
+    #[Test]
+    public function a_single_observation_is_not_described_as_premises(): void
+    {
+        $tooltips = LineChart::fromSeries($this->richSeries())->tooltipPoints();
+
+        $this->assertSame('1 premise', $tooltips[1]['samples']);
+    }
+
+    #[Test]
+    public function tooltip_points_carry_the_coordinates_the_marker_is_drawn_at(): void
+    {
+        $chart = LineChart::fromSeries($this->richSeries());
+        $tooltips = $chart->tooltipPoints();
+
+        // The hover marker and the tooltip must agree on where a point is, or the
+        // dot and the label will drift apart.
+        foreach ($chart->points as $i => $point) {
+            $this->assertSame($point['x'], $tooltips[$i]['x']);
+            $this->assertSame($point['y'], $tooltips[$i]['y']);
+        }
+    }
+
+    #[Test]
+    public function a_series_without_range_data_still_produces_tooltips(): void
+    {
+        // PriceQueries::series() always supplies these, but the chart is generic and
+        // must not fatal when handed a bare series.
+        $tooltips = LineChart::fromSeries(
+            $this->series([['2026-01-01', 10.0], ['2026-01-02', 12.0]])
+        )->tooltipPoints();
+
+        $this->assertSame('RM 10.00', $tooltips[0]['price']);
+        $this->assertNull($tooltips[0]['range']);
+        $this->assertNull($tooltips[0]['samples']);
+    }
+
+    #[Test]
+    public function it_exposes_the_padding_the_view_needs_for_the_hover_guide(): void
+    {
+        $chart = LineChart::fromSeries($this->richSeries(), padding: 24);
+
+        $this->assertSame(24, $chart->padding);
+    }
+
     #[Test]
     public function it_labels_four_grid_lines_spanning_the_value_range(): void
     {

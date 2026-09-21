@@ -2,6 +2,7 @@
 
 namespace App\Support;
 
+use Carbon\CarbonImmutable;
 use Illuminate\Support\Collection;
 
 /**
@@ -15,7 +16,7 @@ use Illuminate\Support\Collection;
 final readonly class LineChart
 {
     /**
-     * @param  array<int, array{x: float, y: float, label: string, value: float}>  $points
+     * @param  array<int, array{x: float, y: float, label: string, value: float, min: ?float, max: ?float, samples: ?int}>  $points
      * @param  array<int, array{y: float, value: float}>  $gridLines
      */
     public function __construct(
@@ -27,6 +28,7 @@ final readonly class LineChart
         public float $max,
         public int $width,
         public int $height,
+        public int $padding,
     ) {}
 
     /**
@@ -71,6 +73,11 @@ final readonly class LineChart
                 'y' => round($padding + (1 - (($value - $min) / $range)) * $plotHeight, 2),
                 'label' => (string) $row->date,
                 'value' => $value,
+                // Carried through when the series has them, so a tooltip can show
+                // the spread behind the average rather than the average alone.
+                'min' => isset($row->min_price) ? (float) $row->min_price : null,
+                'max' => isset($row->max_price) ? (float) $row->max_price : null,
+                'samples' => isset($row->sample_count) ? (int) $row->sample_count : null,
             ];
         }
 
@@ -106,6 +113,7 @@ final readonly class LineChart
             max: $max,
             width: $width,
             height: $height,
+            padding: $padding,
         );
     }
 
@@ -132,5 +140,30 @@ final readonly class LineChart
     public function lastPoint(): array
     {
         return $this->points[count($this->points) - 1];
+    }
+
+    /**
+     * The point data a hover tooltip needs, with every figure already formatted.
+     *
+     * Formatting here rather than in JavaScript keeps one implementation of "how a
+     * ringgit figure looks" instead of two that can drift apart, and means the
+     * client script only positions strings it is handed.
+     *
+     * @return array<int, array{x: float, y: float, date: string, price: string, range: ?string, samples: ?string}>
+     */
+    public function tooltipPoints(): array
+    {
+        return array_map(static fn (array $point): array => [
+            'x' => $point['x'],
+            'y' => $point['y'],
+            'date' => CarbonImmutable::parse($point['label'])->format('D, j M Y'),
+            'price' => 'RM '.number_format($point['value'], 2),
+            'range' => $point['min'] !== null && $point['max'] !== null
+                ? 'RM '.number_format($point['min'], 2).' – RM '.number_format($point['max'], 2)
+                : null,
+            'samples' => $point['samples'] !== null
+                ? number_format($point['samples']).' '.($point['samples'] === 1 ? 'premise' : 'premises')
+                : null,
+        ], $this->points);
     }
 }

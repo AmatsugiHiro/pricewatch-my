@@ -137,38 +137,138 @@
         </div>
 
         @if ($chart)
-            <svg viewBox="0 0 {{ $chart->width }} {{ $chart->height }}" class="h-auto w-full" role="img"
-                 aria-label="Line chart of the average price over the last {{ $days }} days">
-                <defs>
-                    <linearGradient id="priceFill" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="0%" stop-color="rgb(15 23 42)" stop-opacity="0.12"/>
-                        <stop offset="100%" stop-color="rgb(15 23 42)" stop-opacity="0"/>
-                    </linearGradient>
-                </defs>
+            @php $last = $chart->lastPoint(); @endphp
 
-                @foreach ($chart->gridLines as $line)
-                    <line x1="32" y1="{{ $line['y'] }}" x2="{{ $chart->width - 32 }}" y2="{{ $line['y'] }}"
-                          stroke="rgb(226 232 240)" stroke-width="1"/>
-                    <text x="{{ $chart->width - 28 }}" y="{{ $line['y'] + 3 }}" font-size="10" fill="rgb(100 116 139)">
-                        {{ number_format($line['value'], 2) }}
+            {{--
+                wire:key is load-bearing. Livewire morphs the DOM in place on
+                re-render, and Alpine only evaluates x-data when an element is
+                created — so without a key that changes with the range and state,
+                switching 90d to 365d would leave the tooltip reading the previous
+                range's points.
+            --}}
+            <div
+                wire:key="chart-{{ $days }}-{{ $state }}"
+                class="relative"
+                x-data="{
+                    points: {{ Js::from($chart->tooltipPoints()) }},
+                    viewBoxWidth: {{ $chart->width }},
+                    viewBoxHeight: {{ $chart->height }},
+                    index: null,
+                    get active() {
+                        return this.index === null ? null : this.points[this.index]
+                    },
+                    locate(clientX) {
+                        const box = this.$refs.plot.getBoundingClientRect()
+                        if (! box.width) return
+
+                        // The SVG scales to its container, so pointer pixels have to
+                        // be mapped back into viewBox units before comparing them
+                        // against the server-computed point positions.
+                        const target = ((clientX - box.left) / box.width) * this.viewBoxWidth
+
+                        let nearest = 0
+                        let shortest = Infinity
+
+                        this.points.forEach((point, i) => {
+                            const distance = Math.abs(point.x - target)
+                            if (distance < shortest) {
+                                shortest = distance
+                                nearest = i
+                            }
+                        })
+
+                        this.index = nearest
+                    },
+                    step(delta) {
+                        if (this.index === null) {
+                            this.index = this.points.length - 1
+                            return
+                        }
+                        this.index = Math.min(this.points.length - 1, Math.max(0, this.index + delta))
+                    },
+                    clear() { this.index = null },
+                }"
+                @mouseleave="clear()"
+            >
+                <svg x-ref="plot"
+                     viewBox="0 0 {{ $chart->width }} {{ $chart->height }}"
+                     class="h-auto w-full rounded focus:outline-none focus-visible:ring-2 focus-visible:ring-slate-400"
+                     role="img" tabindex="0"
+                     aria-label="Average price over the last {{ $days }} days, from {{ \Illuminate\Support\Carbon::parse($chart->points[0]['label'])->format('j M Y') }} to {{ \Illuminate\Support\Carbon::parse($last['label'])->format('j M Y') }}. Focus the chart and use the left and right arrow keys to read each day."
+                     @mousemove="locate($event.clientX)"
+                     @touchstart.passive="locate($event.touches[0].clientX)"
+                     @touchmove.passive="locate($event.touches[0].clientX)"
+                     @focus="index = points.length - 1"
+                     @blur="clear()"
+                     @keydown.arrow-left.prevent="step(-1)"
+                     @keydown.arrow-right.prevent="step(1)"
+                     @keydown.escape="clear()">
+                    <defs>
+                        <linearGradient id="priceFill" x1="0" y1="0" x2="0" y2="1">
+                            <stop offset="0%" stop-color="rgb(15 23 42)" stop-opacity="0.12"/>
+                            <stop offset="100%" stop-color="rgb(15 23 42)" stop-opacity="0"/>
+                        </linearGradient>
+                    </defs>
+
+                    @foreach ($chart->gridLines as $line)
+                        <line x1="{{ $chart->padding }}" y1="{{ $line['y'] }}"
+                              x2="{{ $chart->width - $chart->padding }}" y2="{{ $line['y'] }}"
+                              stroke="rgb(226 232 240)" stroke-width="1"/>
+                        <text x="{{ $chart->width - ($chart->padding - 4) }}" y="{{ $line['y'] + 3 }}"
+                              font-size="10" fill="rgb(100 116 139)">
+                            {{ number_format($line['value'], 2) }}
+                        </text>
+                    @endforeach
+
+                    <path d="{{ $chart->areaPath }}" fill="url(#priceFill)"/>
+                    <path d="{{ $chart->linePath }}" fill="none" stroke="rgb(15 23 42)" stroke-width="2"
+                          stroke-linejoin="round" stroke-linecap="round"/>
+
+                    {{-- Resting marker on the most recent day, hidden while hovering. --}}
+                    <circle cx="{{ $last['x'] }}" cy="{{ $last['y'] }}" r="3.5" fill="rgb(15 23 42)"
+                            x-show="! active"/>
+
+                    {{--
+                        Hover marker. The coordinates fall back to 0 rather than
+                        `active?.x` alone: while nothing is hovered that expression
+                        is undefined, Alpine binds it as an empty string, and SVG
+                        rejects x1="" with "Expected length". The element is hidden
+                        either way, but the console fills with parse errors.
+                    --}}
+                    <g x-show="active" x-cloak>
+                        <line :x1="active?.x ?? 0" :x2="active?.x ?? 0"
+                              y1="{{ $chart->padding }}" y2="{{ $chart->height - $chart->padding }}"
+                              stroke="rgb(148 163 184)" stroke-width="1" stroke-dasharray="3 3"/>
+                        <circle :cx="active?.x ?? 0" :cy="active?.y ?? 0" r="5"
+                                fill="white" stroke="rgb(15 23 42)" stroke-width="2.5"/>
+                    </g>
+
+                    <text x="{{ $chart->padding }}" y="{{ $chart->height - 10 }}" font-size="10" fill="rgb(100 116 139)">
+                        {{ \Illuminate\Support\Carbon::parse($chart->points[0]['label'])->format('j M') }}
                     </text>
-                @endforeach
+                    <text x="{{ $chart->width - $chart->padding }}" y="{{ $chart->height - 10 }}" font-size="10"
+                          fill="rgb(100 116 139)" text-anchor="end">
+                        {{ \Illuminate\Support\Carbon::parse($last['label'])->format('j M') }}
+                    </text>
+                </svg>
 
-                <path d="{{ $chart->areaPath }}" fill="url(#priceFill)"/>
-                <path d="{{ $chart->linePath }}" fill="none" stroke="rgb(15 23 42)" stroke-width="2"
-                      stroke-linejoin="round" stroke-linecap="round"/>
-
-                @php $last = $chart->lastPoint(); @endphp
-                <circle cx="{{ $last['x'] }}" cy="{{ $last['y'] }}" r="3.5" fill="rgb(15 23 42)"/>
-
-                <text x="32" y="{{ $chart->height - 10 }}" font-size="10" fill="rgb(100 116 139)">
-                    {{ \Illuminate\Support\Carbon::parse($chart->points[0]['label'])->format('j M') }}
-                </text>
-                <text x="{{ $chart->width - 32 }}" y="{{ $chart->height - 10 }}" font-size="10"
-                      fill="rgb(100 116 139)" text-anchor="end">
-                    {{ \Illuminate\Support\Carbon::parse($last['label'])->format('j M') }}
-                </text>
-            </svg>
+                <div x-show="active" x-cloak
+                     class="pointer-events-none absolute z-10 whitespace-nowrap rounded-lg border border-slate-200 bg-white px-3 py-2 shadow-lg"
+                     :style="`left: ${Math.min(90, Math.max(10, (active?.x ?? 0) / viewBoxWidth * 100))}%;
+                              top: ${(active?.y ?? 0) / viewBoxHeight * 100}%;
+                              transform: translate(-50%, calc(-100% - 12px));`">
+                    <p class="text-xs text-slate-500" x-text="active?.date"></p>
+                    <p class="text-sm font-semibold tabular-nums text-slate-900" x-text="active?.price"></p>
+                    <template x-if="active?.range">
+                        <p class="mt-1 text-xs tabular-nums text-slate-500">
+                            Range <span x-text="active.range"></span>
+                        </p>
+                    </template>
+                    <template x-if="active?.samples">
+                        <p class="text-xs tabular-nums text-slate-500" x-text="active.samples"></p>
+                    </template>
+                </div>
+            </div>
         @else
             <p class="py-12 text-center text-sm text-slate-500">
                 Not enough data points to draw a trend for this selection.

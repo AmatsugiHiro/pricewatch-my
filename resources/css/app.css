@@ -7,3 +7,9 @@
     --font-sans: 'Instrument Sans', ui-sans-serif, system-ui, sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji',
         'Segoe UI Symbol', 'Noto Color Emoji';
 }
+
+/* Alpine hides these until it initialises, so server-rendered hover state never
+   flashes on screen before the script that controls it has loaded. */
+[x-cloak] {
+    display: none !important;
+}

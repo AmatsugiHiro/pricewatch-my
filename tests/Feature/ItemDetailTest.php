@@ -50,6 +50,44 @@ class ItemDetailTest extends TestCase
     }
 
     #[Test]
+    public function the_hover_marker_never_binds_an_empty_svg_coordinate(): void
+    {
+        $this->seedSeries();
+
+        // While nothing is hovered, `active?.x` is undefined and Alpine binds it as
+        // an empty string, which SVG rejects with "Expected length" and which fills
+        // the browser console with parse errors on every page view. PHPUnit cannot
+        // see SVG parse errors, so this asserts on the markup that causes them.
+        $html = Livewire::test(ItemDetail::class, ['itemCode' => 1])->html();
+
+        foreach ([':x1', ':x2', ':cx', ':cy'] as $binding) {
+            $this->assertStringNotContainsString(
+                $binding.'="active?.x"',
+                $html,
+                "{$binding} must fall back to a number rather than binding undefined."
+            );
+            $this->assertStringNotContainsString($binding.'="active?.y"', $html);
+        }
+
+        $this->assertStringContainsString(':x1="active?.x ?? 0"', $html);
+        $this->assertStringContainsString(':cy="active?.y ?? 0"', $html);
+    }
+
+    #[Test]
+    public function the_chart_is_keyed_so_a_range_change_rebuilds_its_hover_state(): void
+    {
+        $this->seedSeries();
+
+        // Livewire morphs the DOM in place and Alpine only evaluates x-data when an
+        // element is created, so without a key that varies with the range the
+        // tooltip would keep serving the previous range's points.
+        Livewire::test(ItemDetail::class, ['itemCode' => 1])
+            ->assertSee('chart-90-', false)
+            ->call('setRange', 30)
+            ->assertSee('chart-30-', false);
+    }
+
+    #[Test]
     public function it_only_accepts_a_range_it_offers(): void
     {
         $this->seedSeries();
