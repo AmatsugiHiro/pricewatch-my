@@ -9,6 +9,7 @@ use App\Services\Aggregation\DailyPriceAggregator;
 use App\Services\Alerts\WatchEvaluator;
 use App\Services\Ingestion\LookupImporter;
 use App\Services\Ingestion\PriceCatcherImporter;
+use App\Services\Queries\PriceQueries;
 use Illuminate\Console\Command;
 use Illuminate\Support\Carbon;
 use Throwable;
@@ -72,6 +73,12 @@ class SyncPriceData extends Command
             $this->components->twoColumnDetail('Thresholds breached', number_format($result->breached));
             $this->components->twoColumnDetail('Notifications sent', number_format($result->notified));
         }
+
+        // The web tier caches the latest date and the coverage counters. Ingestion
+        // runs in a different process — and, once scheduled in CI, on a different
+        // machine — so the shared cache has to be invalidated here or the site will
+        // keep reporting the previous day's data until the TTL lapses.
+        PriceQueries::flushCaches();
 
         $this->newLine();
         $this->summarise();

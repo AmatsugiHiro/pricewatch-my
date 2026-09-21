@@ -1,0 +1,161 @@
+name: Ingest prices
+
+# The scheduler lives here rather than on the web host.
+#
+# The ingest streams a ~48 MB file and takes minutes per month, which is exactly
+# what a serverless web tier forbids: Vercel caps a function at 15 minutes and
+# cannot run a queue worker at all. GitHub Actions allows 6 hours per job, costs
+# nothing on a public repository, and keeps the long-running job out of the
+# request path where it never belonged.
+
+on:
+  schedule:
+    # 07:15 Malaysia time (UTC+8) is 23:15 UTC the previous day.
+    - cron: '15 23 * * *'
+
+  workflow_dispatch:
+    inputs:
+      months:
+        description: 'How many recent months to ingest (use 12 for a first backfill)'
+        required: false
+        default: '2'
+      force:
+        description: 'Re-download and re-ingest even when the source is unchanged'
+        type: boolean
+        required: false
+        default: false
+
+# Never let a slow run overlap the next day's. Queue it instead of cancelling,
+# so a half-finished import is not abandoned partway through a month.
+concurrency:
+  group: pricewatch-ingest
+  cancel-in-progress: false
+
+jobs:
+  ingest:
+    name: Sync PriceCatcher data
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    env:
+      APP_ENV: production
+      APP_DEBUG: 'false'
+      APP_KEY: ${{ secrets.APP_KEY }}
+      APP_URL: ${{ secrets.APP_URL }}
+
+      DB_CONNECTION: mysql
+      DB_HOST: ${{ secrets.DB_HOST }}
+      DB_PORT: ${{ secrets.DB_PORT }}
+      DB_DATABASE: ${{ secrets.DB_DATABASE }}
+      DB_USERNAME: ${{ secrets.DB_USERNAME }}
+      DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+      MYSQL_ATTR_SSL_CA: ${{ github.workspace }}/storage/app/aiven-ca.pem
+
+      # The shared cache, so flushing it here reaches the web tier.
+      CACHE_STORE: database
+      SESSION_DRIVER: database
+
+      # No worker exists in a CI job, so alert mail is sent inline.
+      QUEUE_CONNECTION: sync
+      MAIL_MAILER: ${{ secrets.MAIL_MAILER || 'log' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_mysql, mbstring, bcmath, intl, zip
+          coverage: none
+
+      - name: Cache Composer packages
+        uses: actions/cache@v4
+        with:
+          path: vendor
+          key: composer-prod-${{ hashFiles('composer.lock') }}
+          restore-keys: composer-prod-
+
+      - name: Install dependencies
+        run: composer install --no-dev --prefer-dist --no-interaction --no-progress --optimize-autoloader
+
+      - name: Verify required secrets are present
+        run: |
+          missing=0
+          for name in APP_KEY DB_HOST DB_PORT DB_DATABASE DB_USERNAME DB_PASSWORD; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Missing required secret: $name"
+              missing=1
+            fi
+          done
+          [ "$missing" -eq 0 ] || exit 1
+
+      - name: Write the database TLS certificate
+        # Aiven requires TLS. Laravel already reads MYSQL_ATTR_SSL_CA, so the
+        # certificate only has to exist on disk at that path.
+        #
+        # The secret is passed through the environment rather than interpolated
+        # into the script: a PEM is multi-line, and splicing it straight into a
+        # shell command would break on its newlines and would put the value into
+        # the command text itself.
+        env:
+          DB_SSL_CA: ${{ secrets.DB_SSL_CA }}
+        run: |
+          mkdir -p storage/app
+          if [ -n "$DB_SSL_CA" ]; then
+            printf '%s\n' "$DB_SSL_CA" > "$MYSQL_ATTR_SSL_CA"
+            chmod 600 "$MYSQL_ATTR_SSL_CA"
+            echo "CA certificate written ($(wc -c < "$MYSQL_ATTR_SSL_CA") bytes)"
+          else
+            echo "::warning::No DB_SSL_CA secret set; connecting without certificate verification."
+            # Unset it so PDO is not handed a path to a file that does not exist.
+            echo "MYSQL_ATTR_SSL_CA=" >> "$GITHUB_ENV"
+          fi
+
+      - name: Prepare the environment file
+        # Real environment variables take precedence over .env in Laravel, so this
+        # only supplies defaults for anything not set above.
+        run: cp .env.example .env
+
+      - name: Confirm the database is reachable
+        run: php artisan db:show --json | head -c 300
+
+      - name: Run migrations
+        run: php artisan migrate --force
+
+      - name: Refresh the item and premise lookups
+        run: php artisan pricewatch:sync --lookups-only ${{ inputs.force && '--force' || '' }}
+
+      - name: Ingest each month, pruning as we go
+        run: |
+          MONTHS="${{ inputs.months || '2' }}"
+          FORCE="${{ inputs.force && '--force' || '' }}"
+
+          echo "Ingesting the most recent $MONTHS month(s)."
+
+          # Oldest first. Pruning after each month keeps peak storage bounded even
+          # during a twelve-month backfill: the retention window is measured from
+          # the latest observation, so as the backfill advances the earliest months
+          # age out of the raw table on their own. Their rollups stay forever.
+          for offset in $(seq $((MONTHS - 1)) -1 0); do
+            PERIOD=$(date -u -d "$(date -u +%Y-%m-01) -${offset} month" +%Y-%m)
+
+            echo "::group::$PERIOD"
+            php artisan pricewatch:sync --month="$PERIOD" --skip-lookups $FORCE
+            php artisan pricewatch:prune --keep-days=70
+            echo "::endgroup::"
+          done
+
+      - name: Summarise
+        if: always()
+        run: |
+          {
+            echo "### PriceWatch ingest"
+            echo
+            php artisan tinker --execute="
+              echo '- Observations retained: ' . number_format(\App\Models\PriceRecord::count()) . PHP_EOL;
+              echo '- Rollup rows: ' . number_format(\App\Models\DailyItemStatePrice::count()) . PHP_EOL;
+              echo '- Latest day: ' . (\App\Models\DailyItemStatePrice::max('date') ?: 'none') . PHP_EOL;
+              echo '- Months ingested: ' . \App\Models\IngestionRun::where('dataset','pricecatcher')->where('status','completed')->count() . PHP_EOL;
+            " 2>/dev/null || echo "- (could not read totals)"
+          } >> "$GITHUB_STEP_SUMMARY"

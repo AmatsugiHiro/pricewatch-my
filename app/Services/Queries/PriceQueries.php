@@ -24,6 +24,33 @@ use Illuminate\Support\Facades\DB;
 final class PriceQueries
 {
     /**
+     * Every cache key this class owns.
+     *
+     * @var array<int, string>
+     */
+    public const CACHE_KEYS = [
+        'pricewatch:latest-date',
+        'pricewatch:states',
+        'pricewatch:categories',
+        'pricewatch:coverage',
+    ];
+
+    /**
+     * Drop everything this class caches.
+     *
+     * Ingestion runs in a separate process from the web tier — on a different
+     * machine entirely once the scheduler lives in CI — so a sync that adds a new
+     * day has to invalidate the shared cache explicitly. Without this the site
+     * keeps serving yesterday's "latest data" until the TTL happens to lapse.
+     */
+    public static function flushCaches(): void
+    {
+        foreach (self::CACHE_KEYS as $key) {
+            Cache::forget($key);
+        }
+    }
+
+    /**
      * The most recent day for which a rollup exists.
      */
     public function latestDate(): ?string
